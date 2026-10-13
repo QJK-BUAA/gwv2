@@ -1,0 +1,14 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+
+# Run outputs and response caches (regenerated per run)
+outputs/
+*.cache.jsonl
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/

@@ -1,0 +1,4 @@
+# GraphWalkerSQL reproduction (gwv2)
+# Python 3.9+
+openai>=1.0.0
+sqlglot>=20.0.0
