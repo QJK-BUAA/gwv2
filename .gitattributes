@@ -1,0 +1,2 @@
+# Keep pinned third-party source bytes, including upstream prompt whitespace.
+baselines/vendor/* -whitespace

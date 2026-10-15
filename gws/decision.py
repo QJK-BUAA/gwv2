@@ -1,140 +1,115 @@
-"""Decision-model call: parse local decisions, interpretations, and probes.
-
-The decision model considers at most the first six decisions and twelve actions.
-Each probe is linked to exactly one decision and lists p(HIT) per interpretation.
-Likelihood vectors are sanitized (negative/non-finite -> 0, then normalized per
-binary row); invalid probes (bad kind, unknown identifiers, missing args) are
-dropped with a count. The result feeds the EVSI Explore loop.
-"""
-from __future__ import annotations
-
-import math
-
-from . import config, prompts
-from .ground import GroundResult
+"""Validated finite decision models and globally deduplicated binary actions."""
+import json
+from dataclasses import asdict
+from . import config, paper_prompts as prompts
+from .belief import normalize
+from .ground import _common_context
 from .parsing import extract_json
-from .probes import VALID_KINDS
-from .schema import Schema
+from .probes import compile_probe
+from .sql_analysis import legal_columns
 from .types import Decision, Interpretation, Probe
 
 
-def _ctx(schema: Schema, question: str, evidence: str, ground: GroundResult,
-         draft_exec: str) -> str:
-    lines = [schema.to_ddl_text(annotate=True), "", f"Question: {question}"]
-    if evidence:
-        lines.append(f"External evidence: {evidence}")
-    lines.append("")
-    lines.append("Requirements:")
-    for r in ground.requirements:
-        lines.append(f"  [{r.id}] {r.kind}: {r.need} -> {r.columns} "
-                     f"(alts {r.alternatives})")
-    lines.append("")
-    lines.append(f"Independent draft SQL:\n{ground.draft_sql or '(none)'}")
-    lines.append(f"Draft execution: {draft_exec}")
-    if ground.paths:
-        lines.append("")
-        lines.append("Candidate join paths:")
-        for p in ground.paths[:config.MAX_PATHS_OVERALL]:
-            lines.append(f"  {p.path_id}")
-    return "\n".join(lines)
-
-
-def _sanitize_likelihoods(raw, interp_keys: list[str]) -> dict[str, float] | None:
-    """p(HIT|z) per interpretation; drop if dimensions/values are invalid."""
-    if not isinstance(raw, dict):
-        return None
-    vec: dict[str, float] = {}
-    for k in interp_keys:
-        v = raw.get(k)
-        try:
-            v = float(v)
-        except (TypeError, ValueError):
-            v = 0.0
-        if not math.isfinite(v) or v < 0.0:
-            v = 0.0
-        vec[k] = min(1.0, v)
-    if not vec or len(vec) != len(interp_keys):
-        return None
-    return vec
-
-
-def parse_decisions(text: str, schema: Schema) -> tuple[list[Decision], int]:
-    """Return (decisions, n_rejected_probes). Enforces the paper's caps."""
+def parse_decisions_detailed(text, schema):
     obj = extract_json(text, ("decisions",))
-    if not obj:
-        return [], 0
-    decisions: list[Decision] = []
-    rejected = 0
-    total_probes = 0
-    for drec in (obj.get("decisions") or [])[: config.MAX_DECISIONS]:
-        if not isinstance(drec, dict):
-            continue
-        interps_raw = drec.get("interpretations") or []
-        interps: list[Interpretation] = []
-        for irec in interps_raw:
-            if not isinstance(irec, dict):
+    if obj is None:
+        raise ValueError("Invalid decision-model response")
+    decisions, diagnostics, action_ids, facts = {}, [], set(), set()
+    raw_decisions = obj.get("decisions", [])
+    if not isinstance(raw_decisions, list):
+        raise ValueError("decisions must be a list")
+    for i, item in enumerate(raw_decisions[:config.MAX_DECISIONS]):
+        try:
+            did = str(item.get("id") or f"d{i+1}")
+            options = item.get("options", item.get("interpretations", []))
+            if did in decisions or not isinstance(options, list) or not 2 <= len(options) <= 4:
+                raise ValueError("Duplicate id or invalid alternatives")
+            keys = [str(x.get("id", x.get("key", f"h{j+1}"))) for j, x in enumerate(options)]
+            if len(set(keys)) != len(keys):
+                raise ValueError("Duplicate option ids")
+            p = normalize([x["prior"] for x in options])
+            interps = [Interpretation(k, str(x.get("interpretation", x.get("label", ""))), v,
+                                     legal_columns(schema, x.get("columns", [])))
+                       for k, x, v in zip(keys, options, p)]
+            decisions[did] = Decision(did, str(item.get("need", item.get("description", ""))), interps)
+        except (ValueError, TypeError, KeyError, AttributeError) as exc:
+            diagnostics.append(f"decision {i}: {exc}")
+    actions = obj.get("actions")
+    if actions is None:
+        actions = [{**p, "decision": d.get("id", f"d{i+1}")}
+                   for i, d in enumerate(raw_decisions) if isinstance(d, dict)
+                   for p in d.get("probes", []) if isinstance(p, dict)]
+    if not isinstance(actions, list):
+        raise ValueError("actions must be a list")
+    for i, item in enumerate(actions[:config.MAX_PROBE_ACTIONS]):
+        try:
+            did = str(item.get("decision", item.get("decision_id", "")))
+            if did not in decisions:
+                raise ValueError("Unknown decision")
+            aid = str(item.get("id") or f"a{i+1}")
+            if aid in action_ids:
+                raise ValueError("Duplicate action id")
+            action_ids.add(aid)
+            keys = [o.key for o in decisions[did].interpretations]
+            if "likelihood" in item:
+                rows = item["likelihood"]
+                if not isinstance(rows, list) or len(rows) != len(keys):
+                    raise ValueError("Likelihood dimension mismatch")
+                rows = [normalize(r) for r in rows]
+                if any(len(r) != 2 for r in rows):
+                    raise ValueError("Binary likelihood requires two outcomes")
+                like = dict(zip(keys, [r[1] for r in rows]))
+            else:
+                raw = item.get("likelihoods", {})
+                if not isinstance(raw, dict) or set(raw) != set(keys):
+                    raise ValueError("Likelihood keys mismatch")
+                like = {k: float(raw[k]) for k in keys}
+                for v in like.values():
+                    normalize([1 - v, v])
+            dotted = item.get("column", "")
+            if item.get("table"):
+                dotted = f"{item['table']}.{dotted}"
+            col = legal_columns(schema, [dotted])
+            if not col:
+                raise ValueError("Unknown action column")
+            t, c = col[0].split(".", 1)
+            ot, oc = "", ""
+            if item.get("kind", "").lower() == "overlap":
+                other = item.get("other_column", "")
+                if item.get("table2"):
+                    other = f"{item['table2']}.{item.get('column2', '')}"
+                cols = legal_columns(schema, [other])
+                if not cols:
+                    raise ValueError("Unknown overlap endpoint")
+                ot, oc = cols[0].split(".", 1)
+            probe = Probe(aid, did, str(item.get("kind", "")).lower(), t, c,
+                          item.get("value", item.get("literal")), ot, oc, like,
+                          str(item.get("reason", "")), str(item.get("caveat", "")))
+            sql, params = compile_probe(probe)
+            key = json.dumps([sql, params], ensure_ascii=False, sort_keys=True)
+            if key in facts:
+                diagnostics.append(f"action {aid}: duplicate SQL/parameter pair")
                 continue
-            key = str(irec.get("key") or f"z{len(interps)+1}")
-            try:
-                prior = float(irec.get("prior", 0.0))
-            except (TypeError, ValueError):
-                prior = 0.0
-            interps.append(Interpretation(key=key,
-                                          label=str(irec.get("label") or ""),
-                                          prior=prior))
-        if not (2 <= len(interps) <= 4):
-            continue
-        interp_keys = [i.key for i in interps]
-        did = str(drec.get("id") or f"d{len(decisions)+1}")
-
-        probes: list[Probe] = []
-        for prec in (drec.get("probes") or []):
-            if total_probes >= config.MAX_PROBE_ACTIONS:
-                break
-            if not isinstance(prec, dict):
-                continue
-            kind = str(prec.get("kind") or "").lower()
-            if kind not in VALID_KINDS:
-                rejected += 1
-                continue
-            like = _sanitize_likelihoods(prec.get("likelihoods") or {}, interp_keys)
-            if like is None:
-                rejected += 1
-                continue
-            probe = Probe(
-                id=str(prec.get("id") or f"a{total_probes+1}"),
-                decision_id=did, kind=kind,
-                table=str(prec.get("table") or ""),
-                column=str(prec.get("column") or ""),
-                literal=prec.get("literal"),
-                table2=str(prec.get("table2") or ""),
-                column2=str(prec.get("column2") or ""),
-                likelihoods=like, reason=str(prec.get("reason") or ""),
-            )
-            if not _probe_identifiers_ok(probe, schema):
-                rejected += 1
-                continue
-            probes.append(probe)
-            total_probes += 1
-        decisions.append(Decision(id=did, description=str(drec.get("description") or ""),
-                                  interpretations=interps, probes=probes))
-    return decisions, rejected
+            facts.add(key)
+            decisions[did].probes.append(probe)
+        except (ValueError, TypeError, KeyError, AttributeError) as exc:
+            diagnostics.append(f"action {i}: {exc}")
+    return list(decisions.values()), diagnostics
 
 
-def _probe_identifiers_ok(probe: Probe, schema: Schema) -> bool:
-    if schema.column(probe.table, probe.column) is None:
-        return False
-    if probe.kind == "equals" and probe.literal is None:
-        return False
-    if probe.kind == "overlap":
-        if schema.column(probe.table2, probe.column2) is None:
-            return False
-    return True
+def parse_decisions(text, schema):
+    decisions, diagnostics = parse_decisions_detailed(text, schema)
+    return decisions, len(diagnostics)
 
 
-def decision_model(llm, schema: Schema, question: str, evidence: str,
-                   ground: GroundResult, draft_exec: str
-                   ) -> tuple[list[Decision], int]:
-    text = llm.complete(prompts.DECISION_SYS,
-                        _ctx(schema, question, evidence, ground, draft_exec))
-    return parse_decisions(text, schema)
+def decision_model(llm, schema, question, evidence, ground, draft_exec):
+    payload = {"requirements": [asdict(r) for r in ground.requirements],
+               "independent_draft": ground.draft_analysis,
+               "candidate_paths": [asdict(p) for p in ground.paths],
+               "draft_execution": draft_exec}
+    text = llm.complete(prompts.DECISION_SYS, _common_context(schema, question, evidence)
+                        + "\nGrounding evidence:\n" + json.dumps(payload, ensure_ascii=False),
+                        stage="decision_model")
+    decisions, diagnostics = parse_decisions_detailed(text, schema)
+    ground.decision_diagnostics = diagnostics
+    return decisions, len(diagnostics)

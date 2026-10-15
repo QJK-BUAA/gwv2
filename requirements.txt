@@ -1,4 +1,10 @@
-# GraphWalkerSQL reproduction (gwv2)
 # Python 3.9+
-openai>=1.0.0
-sqlglot>=20.0.0
+openai==2.43.0
+sqlglot==30.11.0
+json-repair==0.44.1
+networkx==3.2.1
+sqlparse==0.5.5
+tqdm==4.68.1
+func-timeout==4.3.5
+nltk==3.9.2
+numpy==2.0.2

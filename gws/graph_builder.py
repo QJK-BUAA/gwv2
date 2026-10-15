@@ -18,6 +18,8 @@ Path search runs bounded best-first (min-heap) over simple paths with edge cost
 from __future__ import annotations
 
 import heapq
+import re
+from .sql_analysis import legal_joins
 from difflib import SequenceMatcher
 
 from . import config
@@ -30,22 +32,14 @@ _KEY_NAMES = ("id", "code")
 
 def _stem(name: str) -> str:
     """Strip a trailing key suffix / 'id' / 'code' to expose the referent stem."""
-    low = name.lower()
-    for suf in _KEY_SUFFIXES:
-        if low.endswith(suf):
-            return low[: -len(suf)]
-    if low.endswith("id") and len(low) > 2:
-        return low[:-2]
-    return low
+    return re.sub(r"(_id|id|_key|_code|code)$", "", name.lower())
 
 
 def _singularize(table: str) -> str:
-    low = table.lower()
-    if low.endswith("ies"):
+    low = re.sub(r"[^a-z0-9]+", "_", table.lower()).strip("_")
+    if low.endswith("ies") and len(low) > 4:
         return low[:-3] + "y"
-    if low.endswith("ses"):
-        return low[:-2]
-    if low.endswith("s") and not low.endswith("ss"):
+    if low.endswith("s") and len(low) > 3:
         return low[:-1]
     return low
 
@@ -61,20 +55,18 @@ def _is_key_like_source(column_name: str) -> bool:
 
 def _type_compatible(t1: str, t2: str) -> bool:
     """Coarse SQLite type-affinity compatibility used for structural targets."""
-    def fam(t: str) -> str:
-        t = (t or "").upper()
-        if any(k in t for k in ("INT",)):
-            return "int"
-        if any(k in t for k in ("CHAR", "CLOB", "TEXT")):
-            return "text"
-        if any(k in t for k in ("REAL", "FLOA", "DOUB", "NUM", "DEC")):
-            return "real"
-        return "other"
-    f1, f2 = fam(t1), fam(t2)
-    if f1 == f2:
-        return True
-    # int<->real and anything-vs-"other" are treated as compatible (SQLite is lax).
-    return {f1, f2} <= {"int", "real"} or "other" in {f1, f2}
+    return norm_type(t1) == norm_type(t2)
+
+
+def norm_type(t):
+    t = (t or "").upper()
+    if any(k in t for k in ("INT", "NUMBER", "REAL", "FLOA", "DOUB", "DEC", "NUMERIC")):
+        return "NUMERIC"
+    if any(k in t for k in ("CHAR", "TEXT", "CLOB", "STRING")):
+        return "TEXT"
+    if "DATE" in t or "TIME" in t:
+        return "DATETIME"
+    return t or "ANY"
 
 
 def name_score(src_column: str, dst_table: str, dst_column: str) -> float:
@@ -143,14 +135,9 @@ def _coerce_model_relations(schema: Schema,
                             proposed: list[dict]) -> list[RelationCandidate]:
     """Validate model-proposed relations against the actual catalog."""
     out: list[RelationCandidate] = []
-    for rel in proposed or []:
-        try:
-            st, sc = str(rel["src_table"]), str(rel["src_column"])
-            dt, dc = str(rel["dst_table"]), str(rel["dst_column"])
-        except (KeyError, TypeError):
-            continue
-        if schema.column(st, sc) is None or schema.column(dt, dc) is None:
-            continue
+    for rel in legal_joins(schema, proposed):
+        st, sc = rel["left"].split(".", 1)
+        dt, dc = rel["right"].split(".", 1)
         out.append(RelationCandidate(
             src_table=st, src_column=sc, dst_table=dt, dst_column=dc,
             score=config.SCORE_MODEL_PROPOSED, sources=("model",),
@@ -196,8 +183,12 @@ def _adjacency(edges: list[RelationCandidate]) -> dict[str, list[RelationCandida
     """Undirected table-level adjacency; each physical edge appears both ways."""
     adj: dict[str, list[RelationCandidate]] = {}
     for e in edges:
+        if e.src_table == e.dst_table:
+            continue
         adj.setdefault(e.src_table, []).append(e)
         adj.setdefault(e.dst_table, []).append(e)
+    for values in adj.values():
+        values.sort(key=lambda e: (-e.score, e.edge_id))
     return adj
 
 

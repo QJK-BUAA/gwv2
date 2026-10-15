@@ -8,31 +8,66 @@ from __future__ import annotations
 
 import sqlite3
 import threading
+import time
+import json
+from pathlib import Path
+from .sql_analysis import validate_sql
+from .sqlite_access import read_only_uri
 
 from . import config
 
 
 def run_query(sqlite_path: str, sql: str, max_rows: int = config.EXEC_MAX_ROWS,
               timeout: float = config.EXEC_TIMEOUT,
-              params: dict | tuple | None = None) -> dict:
+              params: dict | tuple | None = None, budget=None,
+              stage: str = "observation") -> dict:
     """Execute ``sql`` read-only. Returns a structured result dict.
 
     ok=True  -> {"ok": True, "columns": [...], "rows": [...], "n_shown": int}
     ok=False -> {"ok": False, "error": "..."}
     """
     con = None
+    started = time.monotonic()
+    if budget is not None:
+        budget.charge_read(stage)
     try:
-        con = sqlite3.connect(f"file:{sqlite_path}?mode=ro", uri=True)
+        validate_sql(sql)
+        con = sqlite3.connect(read_only_uri(sqlite_path), uri=True)
+        con.text_factory = lambda value: value.decode(errors="replace")
+        def auth(action, a, b, database, trigger):
+            if action in {sqlite3.SQLITE_PRAGMA, sqlite3.SQLITE_ATTACH, sqlite3.SQLITE_DETACH}:
+                return sqlite3.SQLITE_DENY
+            if action == sqlite3.SQLITE_READ and str(a).lower().startswith(("sqlite_", "pragma_")):
+                return sqlite3.SQLITE_DENY
+            if action == sqlite3.SQLITE_FUNCTION and str(b).lower() in {"load_extension", "readfile", "writefile"}:
+                return sqlite3.SQLITE_DENY
+            return sqlite3.SQLITE_OK
+        con.set_authorizer(auth)
+        con.set_progress_handler(lambda: int(time.monotonic() - started > timeout), 1000)
         timer = threading.Timer(timeout, con.interrupt)
         timer.start()
         try:
             cur = con.cursor()
             cur.execute(sql, params or ())
             cols = [d[0] for d in cur.description] if cur.description else []
-            rows = cur.fetchmany(max_rows)
+            rows = []
+            preview_bytes = 0
+            count = 0
+            for row in cur:
+                count += 1
+                safe_row = tuple(v[:512] if isinstance(v, (str, bytes)) else v for v in row)
+                size = len(json.dumps(safe_row, default=str).encode())
+                if len(rows) < max_rows and preview_bytes + size <= 16384:
+                    rows.append(safe_row)
+                    preview_bytes += size
+                if count > 100000 or time.monotonic() - started > timeout:
+                    return {"ok": False, "status": "limited", "complete": False,
+                            "rows": rows, "columns": cols, "row_count": count,
+                            "error": "Observation cap exceeded"}
         finally:
             timer.cancel()
-        return {"ok": True, "columns": cols, "rows": rows, "n_shown": len(rows)}
+        return {"ok": True, "status": "ok", "complete": True, "columns": cols,
+                "rows": rows, "preview": rows, "n_shown": len(rows), "row_count": count}
     except Exception as e:  # noqa: BLE001
         message = str(e)
         lowered = message.lower()
@@ -42,7 +77,9 @@ def run_query(sqlite_path: str, sql: str, max_rows: int = config.EXEC_MAX_ROWS,
             error_type = "permission_denied"
         else:
             error_type = "error"
-        return {"ok": False, "error": message, "error_type": error_type}
+        return {"ok": False, "status": error_type, "complete": False,
+                "error": message, "error_type": error_type, "rows": [],
+                "columns": [], "row_count": 0}
     finally:
         if con is not None:
             con.close()

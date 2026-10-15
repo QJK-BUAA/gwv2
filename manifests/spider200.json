@@ -1,0 +1,41 @@
+{
+  "cohort": "spider200-reproduction-v1",
+  "provenance": "Explicit reproduction cohort. The original paper source indices are unavailable; this set is not claimed to be the original cohort.",
+  "selection_rule": "Lowest 200 SHA256(UTF8(salt + \"|\" + db_id + \"|\" + question.strip())), then sort by source index.",
+  "salt": "graphwalkersql-spider200",
+  "dev_sha256": "30d64a3fccde493226df79687aed9e4a1c0129525baf44f29c0573d914d758a4",
+  "source_indices": [
+    1, 8, 9, 22, 29, 53, 54, 55, 59, 62, 74, 76, 85, 91, 96, 97, 102, 110, 116, 119,
+    136, 143, 146, 151, 152, 154, 156, 162, 173, 176, 178, 184, 190, 201, 202, 204, 223, 237, 244, 247,
+    248, 257, 258, 261, 267, 280, 281, 290, 294, 295, 297, 303, 304, 305, 314, 318, 321, 325, 339, 345,
+    347, 350, 360, 368, 370, 371, 376, 380, 383, 387, 391, 392, 396, 405, 413, 419, 428, 431, 433, 434,
+    437, 440, 442, 444, 452, 454, 460, 463, 465, 466, 473, 483, 485, 486, 495, 498, 502, 505, 511, 519,
+    522, 526, 538, 540, 545, 546, 558, 560, 568, 571, 574, 582, 590, 591, 594, 597, 600, 608, 609, 614,
+    635, 636, 643, 647, 649, 650, 653, 654, 658, 665, 667, 672, 675, 680, 681, 683, 687, 691, 695, 696,
+    698, 704, 709, 714, 716, 728, 741, 751, 753, 756, 761, 763, 768, 771, 778, 779, 786, 797, 806, 816,
+    818, 820, 821, 831, 834, 843, 846, 848, 849, 860, 862, 865, 869, 882, 884, 887, 888, 892, 900, 906,
+    909, 915, 916, 929, 935, 947, 951, 952, 958, 963, 976, 984, 989, 998, 999, 1003, 1014, 1018, 1020, 1026
+  ],
+  "instance_ids": [
+    "spider1_1", "spider1_8", "spider1_9", "spider1_22", "spider1_29", "spider1_53", "spider1_54", "spider1_55", "spider1_59", "spider1_62",
+    "spider1_74", "spider1_76", "spider1_85", "spider1_91", "spider1_96", "spider1_97", "spider1_102", "spider1_110", "spider1_116", "spider1_119",
+    "spider1_136", "spider1_143", "spider1_146", "spider1_151", "spider1_152", "spider1_154", "spider1_156", "spider1_162", "spider1_173", "spider1_176",
+    "spider1_178", "spider1_184", "spider1_190", "spider1_201", "spider1_202", "spider1_204", "spider1_223", "spider1_237", "spider1_244", "spider1_247",
+    "spider1_248", "spider1_257", "spider1_258", "spider1_261", "spider1_267", "spider1_280", "spider1_281", "spider1_290", "spider1_294", "spider1_295",
+    "spider1_297", "spider1_303", "spider1_304", "spider1_305", "spider1_314", "spider1_318", "spider1_321", "spider1_325", "spider1_339", "spider1_345",
+    "spider1_347", "spider1_350", "spider1_360", "spider1_368", "spider1_370", "spider1_371", "spider1_376", "spider1_380", "spider1_383", "spider1_387",
+    "spider1_391", "spider1_392", "spider1_396", "spider1_405", "spider1_413", "spider1_419", "spider1_428", "spider1_431", "spider1_433", "spider1_434",
+    "spider1_437", "spider1_440", "spider1_442", "spider1_444", "spider1_452", "spider1_454", "spider1_460", "spider1_463", "spider1_465", "spider1_466",
+    "spider1_473", "spider1_483", "spider1_485", "spider1_486", "spider1_495", "spider1_498", "spider1_502", "spider1_505", "spider1_511", "spider1_519",
+    "spider1_522", "spider1_526", "spider1_538", "spider1_540", "spider1_545", "spider1_546", "spider1_558", "spider1_560", "spider1_568", "spider1_571",
+    "spider1_574", "spider1_582", "spider1_590", "spider1_591", "spider1_594", "spider1_597", "spider1_600", "spider1_608", "spider1_609", "spider1_614",
+    "spider1_635", "spider1_636", "spider1_643", "spider1_647", "spider1_649", "spider1_650", "spider1_653", "spider1_654", "spider1_658", "spider1_665",
+    "spider1_667", "spider1_672", "spider1_675", "spider1_680", "spider1_681", "spider1_683", "spider1_687", "spider1_691", "spider1_695", "spider1_696",
+    "spider1_698", "spider1_704", "spider1_709", "spider1_714", "spider1_716", "spider1_728", "spider1_741", "spider1_751", "spider1_753", "spider1_756",
+    "spider1_761", "spider1_763", "spider1_768", "spider1_771", "spider1_778", "spider1_779", "spider1_786", "spider1_797", "spider1_806", "spider1_816",
+    "spider1_818", "spider1_820", "spider1_821", "spider1_831", "spider1_834", "spider1_843", "spider1_846", "spider1_848", "spider1_849", "spider1_860",
+    "spider1_862", "spider1_865", "spider1_869", "spider1_882", "spider1_884", "spider1_887", "spider1_888", "spider1_892", "spider1_900", "spider1_906",
+    "spider1_909", "spider1_915", "spider1_916", "spider1_929", "spider1_935", "spider1_947", "spider1_951", "spider1_952", "spider1_958", "spider1_963",
+    "spider1_976", "spider1_984", "spider1_989", "spider1_998", "spider1_999", "spider1_1003", "spider1_1014", "spider1_1018", "spider1_1020", "spider1_1026"
+  ]
+}

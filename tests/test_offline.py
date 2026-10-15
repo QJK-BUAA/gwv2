@@ -82,7 +82,7 @@ def test_probe_sql():
     ov = Probe("4", "d", "overlap", "t1", "c1", table2="t2", column2="c2",
                likelihoods={})
     sql, _ = compile_probe(ov)
-    check("overlap joins two columns", "JOIN" in sql and "a." in sql and "b." in sql)
+    check("overlap compares two columns", "b." in sql and " = a." in sql)
 
     bad = Probe("5", "d", "equals", "t", "c", literal=None, likelihoods={})
     try:
@@ -179,20 +179,15 @@ def test_parsing():
 
 
 def test_spider200_determinism():
-    # Determinism is a pure function of content hash; verify the selector keys
-    # are stable without loading the dataset (hashing is stdlib only).
-    from gws.datasets import Example, load_spider200
-    import hashlib
+    # Frozen public IDs can be validated without downloading the benchmark.
+    import json
+    from pathlib import Path
     from gws import config
-
-    def key(db, q):
-        payload = f"{config.SPIDER200_SALT}|{db}|{q.strip()}"
-        return hashlib.sha256(payload.encode()).hexdigest()
-    k1 = key("db", "What is X?")
-    k2 = key("db", "What is X?")
-    check("hash key deterministic", k1 == k2)
-    check("different question -> different key", k1 != key("db", "What is Y?"))
-    _ = (Example, load_spider200)  # referenced for import coverage
+    manifest = json.loads(Path(config.SPIDER200_MANIFEST).read_text())
+    indices = manifest["source_indices"]
+    check("200 unique ordered source indices", len(set(indices)) == 200 and indices == sorted(indices))
+    check("explicit IDs match source indices",
+          manifest["instance_ids"] == [f"spider1_{i}" for i in indices])
 
 
 def main():

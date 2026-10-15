@@ -85,6 +85,7 @@ class Interpretation:
     key: str
     label: str
     prior: float
+    columns: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -106,6 +107,7 @@ class Probe:
     column2: str = ""
     likelihoods: dict[str, float] = field(default_factory=dict)
     reason: str = ""
+    caveat: str = ""
 
 
 @dataclass
@@ -125,6 +127,8 @@ class ProbeOutcome:
     status: str          # "hit" | "miss" | "error" | "timeout"
     available: bool      # True iff a Boolean row came back (hit/miss)
     sql: str = ""
+    parameters: tuple = ()
+    error: str = ""
 
     @property
     def is_hit(self) -> bool:
@@ -148,8 +152,11 @@ class CommitContract:
     columns: list[str] = field(default_factory=list)          # physical "table.col"
     joins: list[RelationCandidate] = field(default_factory=list)
     coverage: list[CoverageItem] = field(default_factory=list)
-    unresolved: list[str] = field(default_factory=list)
+    unresolved: list[Any] = field(default_factory=list)
     reason: str = ""
+    evidence_bundle: dict = field(default_factory=dict)
+    raw_reconciliation: dict = field(default_factory=dict)
+    raw_audit: dict = field(default_factory=dict)
 
     def selected_tables(self) -> list[str]:
         tables: list[str] = []

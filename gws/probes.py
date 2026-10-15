@@ -15,6 +15,7 @@ these four kinds and rejects anything else with a diagnostic.
 from __future__ import annotations
 
 import re
+import math
 
 from .types import Probe
 
@@ -40,6 +41,9 @@ def compile_probe(probe: Probe) -> tuple[str, tuple]:
     if kind == "equals":
         if not (probe.table and probe.column) or probe.literal is None:
             raise ValueError("equals probe requires table, column, literal")
+        if (isinstance(probe.literal, bool) or not isinstance(probe.literal, (str, int, float))
+                or isinstance(probe.literal, float) and not math.isfinite(probe.literal)):
+            raise ValueError("equals requires a finite scalar literal")
         t, c = _quote(probe.table), _quote(probe.column)
         sql = f'SELECT EXISTS(SELECT 1 FROM {t} WHERE {c} = ?) AS hit'
         return sql, (probe.literal,)
@@ -67,8 +71,8 @@ def compile_probe(probe: Probe) -> tuple[str, tuple]:
         t1, c1 = _quote(probe.table), _quote(probe.column)
         t2, c2 = _quote(probe.table2), _quote(probe.column2)
         sql = (
-            f'SELECT EXISTS(SELECT 1 FROM {t1} AS a JOIN {t2} AS b '
-            f'ON a.{c1} = b.{c2} WHERE a.{c1} IS NOT NULL) AS hit'
+            f'SELECT EXISTS(SELECT 1 FROM {t1} AS a WHERE a.{c1} IS NOT NULL '
+            f'AND EXISTS(SELECT 1 FROM {t2} AS b WHERE b.{c2} = a.{c1})) AS hit'
         )
         return sql, ()
 

@@ -1,10 +1,6 @@
-"""Central configuration for the GraphWalkerSQL (ARR October 2026) reproduction.
+"""Paper defaults and portable, environment-overridable paths.
 
-Every default here is traced to the paper (main.tex / appendix.tex). Where the
-paper gives an explicit number we use that number; where it names a rule we
-implement the rule. Paths resolve against the surrounding workspace (``研二下``)
-so the code runs on this machine without further setup, and every path/number
-can be overridden with an environment variable of the same name.
+Data and evaluators are prepared by reproduce.py in GWV2_DATA_DIR.
 
 Paper references (section / table):
   * Spider-200 fixed hash-selected subset ....... Sec. Setup / Appendix Tab. 1
@@ -25,9 +21,8 @@ import os
 # --------------------------------------------------------------------------- #
 # Workspace roots
 # --------------------------------------------------------------------------- #
-# .../研二下/gwv2/gws/config.py -> .../研二下
 _THIS = os.path.dirname(os.path.abspath(__file__))
-PROJECT_ROOT = os.path.abspath(os.path.join(_THIS, "..", ".."))
+PROJECT_ROOT = os.path.abspath(os.path.join(_THIS, ".."))
 
 
 def _p(*parts: str) -> str:
@@ -35,35 +30,35 @@ def _p(*parts: str) -> str:
 
 
 # --------------------------------------------------------------------------- #
-# Dataset locations (reuse the extracted benchmarks already on this machine)
+# Dataset locations (prepared automatically by reproduce.py)
 # --------------------------------------------------------------------------- #
-_ITS = _p("论文复现", "Interactive-Text-to-SQL", "dataset", "_extracted")
+DATA_ROOT = os.path.abspath(os.environ.get("GWV2_DATA_DIR", _p(".data")))
+_ITS = DATA_ROOT
 
 # BIRD-Dev (declared FKs): 1,534 questions / 11 databases.
-BIRD_ROOT = os.environ.get("GWV2_BIRD_ROOT", os.path.join(_ITS, "bird_dev", "dev_20240627"))
+BIRD_ROOT = os.environ.get("GWV2_BIRD_ROOT", os.path.join(_ITS, "bird", "dev_20240627"))
 BIRD_DEV_JSON = os.path.join(BIRD_ROOT, "dev.json")
 BIRD_DEV_GOLD = os.path.join(BIRD_ROOT, "dev.sql")
 BIRD_DB_DIR = os.path.join(BIRD_ROOT, "dev_databases")
 BIRD_TABLES_JSON = os.path.join(BIRD_ROOT, "dev_tables.json")
 
-# Spider 1.0-Dev (declared FKs): 1,034 questions / 166 databases.
-SPIDER1_ROOT = os.environ.get("GWV2_SPIDER1_ROOT", os.path.join(_ITS, "spider_data"))
+# Spider 1.0-Dev (declared FKs): 1,034 questions / 20 development databases.
+SPIDER1_ROOT = os.environ.get("GWV2_SPIDER1_ROOT", os.path.join(_ITS, "spider", "spider_data"))
 SPIDER1_DEV_JSON = os.path.join(SPIDER1_ROOT, "dev.json")
 SPIDER1_DEV_GOLD = os.path.join(SPIDER1_ROOT, "dev_gold.sql")
 SPIDER1_DB_DIR = os.path.join(SPIDER1_ROOT, "database")
 SPIDER1_TABLES = os.path.join(SPIDER1_ROOT, "tables.json")
 
-# Spider-200: the paper's fixed hash-selected 200-question Spider 1.0-Dev subset.
+# Explicit reproduction cohort; original paper IDs were not archived.
 SPIDER200_SIZE = int(os.environ.get("GWV2_SPIDER200_SIZE", "200"))
 SPIDER200_SALT = os.environ.get("GWV2_SPIDER200_SALT", "graphwalkersql-spider200")
+SPIDER200_MANIFEST = os.environ.get("GWV2_SPIDER200_MANIFEST", _p("manifests", "spider200.json"))
 
 # --------------------------------------------------------------------------- #
 # Official evaluators (reused, never a bespoke matcher)
 # --------------------------------------------------------------------------- #
-BIRD_EVAL_SCRIPT = _p("论文复现", "Interactive-Text-to-SQL", "evaluation",
-                      "bird_evaluation_raw.py")
-SPIDER1_TESTSUITE = _p("论文复现", "Interactive-Text-to-SQL", "dataset", "_external",
-                       "test-suite-sql-eval")
+BIRD_EVAL_SCRIPT = os.environ.get("GWV2_BIRD_EVALUATOR", os.path.join(DATA_ROOT, "evaluators", "bird_evaluation.py"))
+SPIDER1_TESTSUITE = os.environ.get("GWV2_SPIDER_EVALUATOR", os.path.join(DATA_ROOT, "evaluators", "test-suite-sql-eval"))
 
 # --------------------------------------------------------------------------- #
 # Model backend (Appendix Table 1)

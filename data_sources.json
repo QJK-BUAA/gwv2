@@ -1,0 +1,35 @@
+{
+  "bird": {
+    "name": "BIRD development split (20240627)",
+    "url": "https://bird-bench.oss-cn-beijing.aliyuncs.com/dev.zip",
+    "sha256": "cdd6d19faeb45a23970b98d3ef6c40a87987c95459c2cf12076897a60cf5a630",
+    "source_page": "https://bird-bench.github.io/"
+  },
+  "spider": {
+    "name": "Spider 1.0 public data archive",
+    "url": "https://huggingface.co/datasets/HAL-9001/spider-databases/resolve/4a01bbac6520cd35b216db9e1724e5e1ada60aa4/spider_data.zip",
+    "sha256": "00636695dabed6b5f4b8328a16b13e069a2f16591d5efcce57660669c85b121b",
+    "source_page": "https://yale-lily.github.io/spider",
+    "note": "Byte-identical public mirror of spider_data.zip; SHA-256 is verified."
+  },
+  "bird_evaluator": {
+    "name": "BIRD official execution comparator",
+    "url": "https://raw.githubusercontent.com/AlibabaResearch/DAMO-ConvAI/main/bird/llm/src/evaluation.py",
+    "sha256": "2f591e559dc2d97e5b35d5b656e80b0c2edf968f0bb5a78ddfd1d88b4bbbc472",
+    "note": "The mutable URL is guarded by the pinned source-content hash."
+  },
+  "spider_evaluator": {
+    "name": "Spider official test-suite evaluator",
+    "url": "https://codeload.github.com/taoyds/test-suite-sql-eval/zip/e97acc546ecbee8fa27fa8dbf025ef61493a876c",
+    "sha256": "39ac997728808974da9f255ce803ca14d48862ace4a64b6b8cc99f869532389a",
+    "commit": "e97acc546ecbee8fa27fa8dbf025ef61493a876c",
+    "note": "Uses the development SQLite databases, as in the archived EX protocol."
+  },
+  "bird_annotations": {
+    "name": "BIRD evaluation-only golden schema annotations",
+    "url": "https://raw.githubusercontent.com/Tencent/APEX-SQL-Project/8611d3cda9e439a8af00da1153eda1017f5e3bae/BIRD/data/golden_schema.json",
+    "sha256": "dbbb5355474d7bab485b2a67ee600749a668b115e2edaab551b316009c236650",
+    "commit": "8611d3cda9e439a8af00da1153eda1017f5e3bae",
+    "note": "Never passed to any agent; used only for offline column-selection metrics."
+  }
+}

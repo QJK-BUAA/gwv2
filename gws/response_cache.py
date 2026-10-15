@@ -16,6 +16,8 @@ class RequestEnvelope:
     temperature: float
     seed: int | None
     extra_body: dict = field(default_factory=dict)
+    max_tokens: int = 4096
+    backend_hash: str = ""
 
     @property
     def request_hash(self) -> str:
@@ -34,6 +36,8 @@ class CachedResponse:
     text: str
     response_id: str
     usage: dict[str, Any]
+    model: str = ""
+    finish_reason: str = ""
 
 
 class ResponseCache:
@@ -59,6 +63,8 @@ class ResponseCache:
                         text=str(payload["text"]),
                         response_id=str(payload.get("response_id", "")),
                         usage=dict(payload.get("usage") or {}),
+                        model=str(payload.get("model", "")),
+                        finish_reason=str(payload.get("finish_reason", "")),
                     )
                 except (KeyError, TypeError, ValueError) as exc:
                     raise ValueError(
@@ -81,12 +87,16 @@ class ResponseCache:
         text: str,
         response_id: str = "",
         usage: dict[str, Any] | None = None,
+        model: str = "",
+        finish_reason: str = "",
     ) -> CachedResponse:
         item = CachedResponse(
             request_hash=request.request_hash,
             text=text,
             response_id=response_id,
             usage=dict(usage or {}),
+            model=model,
+            finish_reason=finish_reason,
         )
         payload = json.dumps(
             asdict(item),

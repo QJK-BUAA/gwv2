@@ -18,7 +18,9 @@ filter.
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass, field
+import copy
+from dataclasses import dataclass, field, asdict
+from .budget import Budget
 
 from . import commit as commit_mod
 from . import config
@@ -28,7 +30,7 @@ from .ground import ground as run_ground
 from .explore import explore
 from .probe_executor import run_probe
 from .schema import (Schema, collect_column_stats, extract_schema,
-                     load_column_descriptions)
+                     load_column_descriptions, load_foreign_key_registry)
 from .types import Decision
 
 
@@ -47,6 +49,8 @@ class AblationConfig:
     include_beliefs: bool = True              # downstream-belief control
     coverage_contract: bool = True            # vs ordinary two-round filter
     collect_stats: bool = False               # populate uniqueness for structural
+    implication_filter: bool = False
+    catalog_mode: str = "full"
 
     def label(self) -> str:
         tags = [self.probe_policy]
@@ -81,7 +85,16 @@ class GWSResult:
     explore_steps: list[dict] = field(default_factory=list)
     observations: list[dict] = field(default_factory=list)
     model_calls: int = 0
+    reads: int = 0
     error: str = ""
+    status: str = "failure"
+    selected_joins: list = field(default_factory=list)
+    contract: dict = field(default_factory=dict)
+    rejected_items: list = field(default_factory=list)
+    probe_skips: list = field(default_factory=list)
+    tokens: dict = field(default_factory=dict)
+    model_trace: list = field(default_factory=list)
+    upstream: dict = field(default_factory=dict)
 
 
 # --------------------------------------------------------------------------- #
@@ -95,6 +108,12 @@ def load_db(sqlite_path: str, collect_stats: bool = False) -> Schema:
     if key in _SCHEMA_CACHE:
         return _SCHEMA_CACHE[key]
     schema = extract_schema(sqlite_path)
+    root = os.path.dirname(os.path.dirname(os.path.dirname(sqlite_path)))
+    for name in ("dev_tables.json", "tables.json"):
+        registry = os.path.join(root, name)
+        if os.path.isfile(registry):
+            load_foreign_key_registry(schema, registry)
+            break
     desc_dir = os.path.join(os.path.dirname(sqlite_path), "database_description")
     if os.path.isdir(desc_dir):
         schema.descriptions = load_column_descriptions(desc_dir)
@@ -107,19 +126,15 @@ def load_db(sqlite_path: str, collect_stats: bool = False) -> Schema:
 # --------------------------------------------------------------------------- #
 # Pipeline
 # --------------------------------------------------------------------------- #
-def _draft_exec_summary(sqlite_path: str, draft_sql: str) -> str:
+def _draft_exec_summary(sqlite_path: str, draft_sql: str, budget=None) -> dict:
     if not draft_sql:
-        return "no draft"
-    res = run_query(sqlite_path, draft_sql, max_rows=5)
-    if not res.get("ok"):
-        return f"error: {res.get('error', '')[:160]}"
-    rows = res.get("rows") or []
-    preview = rows[0] if rows else "()"
-    return f"ok, {len(rows)} row(s); first={preview}"
+        return {"status": "no_draft", "complete": False}
+    return run_query(sqlite_path, draft_sql, max_rows=12, timeout=config.PROBE_TIMEOUT,
+                     budget=budget, stage="draft_execution")
 
 
 def _run_probes(sqlite_path: str, decisions: list[Decision],
-                ablation: AblationConfig):
+                ablation: AblationConfig, resource_budget=None):
     """Run the Explore loop; drop overlap probes if value-overlap is disabled."""
     if not ablation.use_value_overlap:
         for d in decisions:
@@ -128,7 +143,43 @@ def _run_probes(sqlite_path: str, decisions: list[Decision],
         sqlite_path, decisions,
         policy=ablation.probe_policy, budget=ablation.budget,
         lam=ablation.lam, seed=ablation.seed, probe_runner=run_probe,
+        implication_filter=ablation.implication_filter, resource_budget=resource_budget,
     )
+
+
+def prepare_upstream(llm, schema, question, evidence, sqlite_path, ablation=None):
+    """Only visible inputs; the returned object can be frozen across controls."""
+    ablation = ablation or AblationConfig()
+    llm.budget = Budget()
+    g = run_ground(llm, schema, question, evidence,
+                   include_structural=ablation.include_structural,
+                   include_model=ablation.include_model,
+                   include_draft=ablation.include_draft)
+    g.draft_execution = _draft_exec_summary(sqlite_path, g.draft_sql, llm.budget)
+    decisions, _ = decision_model(llm, schema, question, evidence, g, g.draft_execution)
+    return {"ground": g, "decisions": decisions, "calls": llm.budget.calls,
+            "reads": llm.budget.reads, "tokens": llm.stats(),
+            "model_trace": copy.deepcopy(getattr(llm, "calls", []))}
+
+
+def finish_upstream(llm, schema, question, evidence, sqlite_path, upstream, ablation,
+                    frozen_trace=None):
+    g, decisions = copy.deepcopy(upstream["ground"]), copy.deepcopy(upstream["decisions"])
+    llm.budget = Budget(calls=upstream["calls"], reads=upstream["reads"])
+    trace = copy.deepcopy(frozen_trace) if frozen_trace is not None else _run_probes(
+        sqlite_path, decisions, ablation, llm.budget)
+    if frozen_trace is not None:
+        for _ in range(trace.attempts):
+            llm.budget.charge_read("frozen_probe_observation")
+    observations = copy.deepcopy(trace.steps)
+    observations.extend({"kind": "implied_skip", **s} for s in trace.skips)
+    contract = commit_mod.commit(llm, schema, question, evidence, g, decisions,
+                                trace.posteriors, trace.map_recommendations, observations,
+                                include_beliefs=ablation.include_beliefs,
+                                coverage_contract=ablation.coverage_contract)
+    sql = commit_mod.generate_sql(llm, schema, question, evidence, g, observations,
+                                 contract, catalog_mode=ablation.catalog_mode)
+    return g, decisions, trace, contract, sql
 
 
 def run_pipeline(llm, instance_id: str, db_id: str, question: str,
@@ -140,45 +191,32 @@ def run_pipeline(llm, instance_id: str, db_id: str, question: str,
     try:
         schema = load_db(sqlite_path, collect_stats=ablation.collect_stats)
 
-        # --- Ground (calls 1-2) ------------------------------------------- #
-        g = run_ground(llm, schema, question, evidence,
-                       include_structural=ablation.include_structural,
-                       include_model=ablation.include_model,
-                       include_draft=ablation.include_draft)
+        upstream = prepare_upstream(llm, schema, question, evidence, sqlite_path, ablation)
+        g, decisions, trace, contract, pred = finish_upstream(
+            llm, schema, question, evidence, sqlite_path, upstream, ablation)
         result.draft_sql = g.draft_sql
         result.n_candidates = len(g.candidates)
         result.n_paths = len(g.paths)
 
-        draft_exec = _draft_exec_summary(sqlite_path, g.draft_sql)
-
-        # --- Explore (call 3 + probes) ------------------------------------ #
-        decisions, _rejected = decision_model(llm, schema, question, evidence,
-                                              g, draft_exec)
         result.n_decisions = len(decisions)
-        trace = _run_probes(sqlite_path, decisions, ablation)
         result.probe_attempts = trace.attempts
         result.stop_reason = trace.stop_reason
         result.explore_steps = trace.steps
-        observations = [
-            {"probe_id": s["probe_id"], "kind": s["kind"], "status": s["status"]}
-            for s in trace.steps
-        ]
-        result.observations = observations
-
-        # --- Commit (calls 4-6) ------------------------------------------- #
-        contract = commit_mod.commit(
-            llm, schema, question, evidence, g, decisions,
-            trace.posteriors, trace.map_recommendations, observations,
-            include_beliefs=ablation.include_beliefs,
-            coverage_contract=ablation.coverage_contract,
-        )
+        result.observations = contract.evidence_bundle["observations"]
         result.selected_columns = list(contract.columns)
-        pred = commit_mod.generate_sql(llm, schema, question, evidence, g,
-                                       observations, contract)
-        result.pred_sql = pred or "SELECT 1"
+        result.selected_joins = [asdict(j) for j in contract.joins]
+        result.contract = commit_mod.contract_payload(contract)
+        result.probe_skips = trace.skips
+        result.rejected_items = g.decision_diagnostics
+        result.upstream = {"ground": asdict(g), "decisions": [asdict(d) for d in decisions]}
+        result.pred_sql = pred
+        result.status = "ok" if pred else "failure"
+        if not pred:
+            result.error = "Invalid final SQL; no fallback"
     except Exception as exc:  # noqa: BLE001
         result.error = f"{type(exc).__name__}: {exc}"
-        if not result.pred_sql:
-            result.pred_sql = "SELECT 1"
     result.model_calls = getattr(llm, "num_calls", 0)
+    result.reads = getattr(getattr(llm, "budget", None), "reads", 0)
+    result.tokens = llm.stats()
+    result.model_trace = copy.deepcopy(getattr(llm, "calls", []))
     return result

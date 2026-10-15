@@ -1,0 +1,49 @@
+{
+  "apex_schema_linking.py": {
+    "repository": "https://github.com/Tencent/APEX-SQL-Project",
+    "commit": "8611d3cda9e439a8af00da1153eda1017f5e3bae",
+    "original_path": "BIRD/schema_linking.py",
+    "sha256": "ef32601014bc9eed96b9dff1aa2d07fcc48b43cc43c62bcced59ab726d54b1a6"
+  },
+  "pv_sql.py": {
+    "repository": "https://github.com/magic-YuanTian/PV-SQL",
+    "commit": "9f2bcd9a16ec1029649222851bd9e08a2af3e2c6",
+    "original_path": "pvsql/pv_sql.py",
+    "sha256": "5308f5be35a8c2e98bd2870e1b9a5d34100c63dccc06d111f567b606870170c7"
+  },
+  "ta_prompts.py": {
+    "repository": "https://github.com/quge2023/TA-SQL",
+    "commit": "80f82b32ce6a7b80a21b9ad705c2539549ddd431",
+    "original_path": "src/prompt_bank.py",
+    "sha256": "355dac7da34c9c7094ccddd9a89f68165a208a69468c73368a80258b49c42870"
+  },
+  "rsl_prompts.py": {
+    "repository": "https://github.com/Laqcce-cao/RSL-SQL",
+    "commit": "fb1dcf02923e5fd89171cc6cfe1ae3e4e5bc3b94",
+    "original_path": "src/configs/Instruction.py",
+    "sha256": "5beede29be281e89f2eaf4d7abbdccafbf1a927ed9088fd4ad1a35cf344016a6"
+  },
+  "sg_linker.py": {
+    "source": "Archived SchemaGraphSQL force-union linker adaptation",
+    "original_path": "schemagraphsql/linker.py",
+    "commit": null,
+    "sha256": "0163cb565498451d25b927b049447683fb36fe8244715dab770e7ac53361bd4c"
+  },
+  "sg_prompts.py": {
+    "source": "Archived SchemaGraphSQL linker prompts",
+    "original_path": "schemagraphsql/prompts.py",
+    "commit": null,
+    "sha256": "309507a3b5cde78aa7c1f7fcae1e90928ed80c87c292e9ce4e49358493c8967e"
+  },
+  "din_c3.py": {
+    "source": "Archived shared-backend DIN-SQL/C3 adaptations; portable imports and header",
+    "prompt_reference": "https://github.com/MohammadrezaPourreza/Few-shot-NL2SQL-with-prompting",
+    "sha256": "1a212b6117d2a9ba270352d903e2e62e11fb776283605afc3be8997b3bbb1e5e"
+  },
+  "PV-SQL-LICENSE": {
+    "sha256": "1eb9c96fe5c6ea85c1cdfe6858057cc99337b53ba56f4bf483d6f5bda300345f"
+  },
+  "RSL-SQL-LICENSE": {
+    "sha256": "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4"
+  }
+}

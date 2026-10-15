@@ -23,12 +23,14 @@ from concurrent.futures import ThreadPoolExecutor
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from baselines import BASELINES  # noqa: E402
+from baselines.methods import ALIGNED_BASELINES
 from gws import config  # noqa: E402
 from gws.datasets import load_and_sample  # noqa: E402
 from gws.evaluate_official import evaluate  # noqa: E402
 from gws.llm import LLM  # noqa: E402
 from gws.pipeline import load_db  # noqa: E402
 from gws.response_cache import ResponseCache  # noqa: E402
+BASELINES = {**BASELINES, **ALIGNED_BASELINES}
 
 
 def run_one(method: str, dataset: str, args) -> dict:
@@ -44,17 +46,15 @@ def run_one(method: str, dataset: str, args) -> dict:
     lock = threading.Lock()
 
     def work(ex):
-        llm = LLM(model=args.model, seed=args.seed, response_cache=cache)
+        llm = LLM(model=args.model, seed=42, response_cache=cache)
         schema = load_db(ex.sqlite_path)
         try:
             out = fn(llm, schema, ex.question, ex.evidence, ex.sqlite_path)
         except Exception as exc:  # noqa: BLE001
-            out = {"pred_sql": "SELECT 1", "model_calls": llm.num_calls,
+            out = {"pred_sql": "", "status": "failure", "model_calls": llm.num_calls,
                    "reads": 0, "error": f"{type(exc).__name__}: {exc}"}
         rec = {"instance_id": ex.instance_id, "db_id": ex.db_id,
-               "pred_sql": out.get("pred_sql", "SELECT 1"),
-               "model_calls": out.get("model_calls"), "reads": out.get("reads"),
-               "error": out.get("error", ""), "tokens": llm.stats()}
+               **out}
         with lock:
             results[ex.instance_id] = rec
             done = len(results)
@@ -78,7 +78,8 @@ def run_one(method: str, dataset: str, args) -> dict:
     summary = {"method": method, "dataset": dataset}
     if not args.no_eval:
         score = evaluate(dataset, examples, pred_sql,
-                         os.path.join(args.outdir, f"{stem}.eval"))
+                         os.path.join(args.outdir, f"{stem}.eval"),
+                         statuses={i: r["status"] for i, r in results.items()})
         summary.update(ex=score.get("ex"), correct=score.get("correct"),
                        n=score.get("n"))
         with open(os.path.join(args.outdir, f"{stem}.summary.json"), "w") as f:
@@ -105,7 +106,7 @@ def main() -> None:
     ap.add_argument("--no-eval", action="store_true")
     args = ap.parse_args()
 
-    methods = list(BASELINES) if args.method == "all" else [args.method]
+    methods = [m for m in BASELINES if not m.endswith("-aligned")] if args.method == "all" else [args.method]
     summaries = [run_one(m, args.dataset, args) for m in methods]
     print("\n=== baseline summary ===")
     for s in sorted(summaries, key=lambda x: -(x.get("ex") or 0)):

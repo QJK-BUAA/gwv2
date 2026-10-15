@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import sqlite3
 import threading
+from .execute import run_query
 
 from . import config
 from .probes import compile_probe
@@ -16,35 +17,18 @@ from .types import Probe, ProbeOutcome
 
 
 def run_probe(sqlite_path: str, probe: Probe,
-              timeout: float = config.PROBE_TIMEOUT) -> ProbeOutcome:
+              timeout: float = config.PROBE_TIMEOUT, budget=None) -> ProbeOutcome:
     try:
         sql, params = compile_probe(probe)
     except ValueError as exc:
         return ProbeOutcome(probe_id=probe.id, kind=probe.kind,
                             status="error", available=False, sql=str(exc))
 
-    con = None
-    try:
-        con = sqlite3.connect(f"file:{sqlite_path}?mode=ro", uri=True)
-        timer = threading.Timer(timeout, con.interrupt)
-        timer.start()
-        try:
-            cur = con.cursor()
-            cur.execute(sql, params)
-            row = cur.fetchone()
-        finally:
-            timer.cancel()
-        if row is None or row[0] is None:
-            return ProbeOutcome(probe_id=probe.id, kind=probe.kind,
-                                status="error", available=False, sql=sql)
-        hit = bool(row[0])
-        return ProbeOutcome(probe_id=probe.id, kind=probe.kind,
-                            status="hit" if hit else "miss",
-                            available=True, sql=sql)
-    except Exception as exc:  # noqa: BLE001
-        status = "timeout" if "interrupt" in str(exc).lower() else "error"
-        return ProbeOutcome(probe_id=probe.id, kind=probe.kind,
-                            status=status, available=False, sql=sql)
-    finally:
-        if con is not None:
-            con.close()
+    result = run_query(sqlite_path, sql, max_rows=1, timeout=timeout, params=params,
+                       budget=budget, stage="active_probe")
+    rows = result.get("rows", [])
+    available = bool(result.get("ok") and result.get("complete") and rows
+                     and len(rows[0]) == 1 and rows[0][0] in (0, 1))
+    status = ("hit" if rows[0][0] else "miss") if available else result.get("status", "error")
+    return ProbeOutcome(probe.id, probe.kind, status, available, sql, params,
+                        result.get("error", ""))

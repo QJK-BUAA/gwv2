@@ -1,144 +1,88 @@
-"""Explore policy: EVSI-ranked, cost-gated probe selection and stopping.
-
-Implements Algorithm 1 lines 6--13 and Eqs. (select)/(stop). Given the decision
-model's decisions (each with interpretations, priors, and attached probes), the
-policy repeatedly selects the highest-scoring remaining probe, tests the cost
-threshold, executes it, and updates only the associated decision's belief.
-
-Policies (Appendix "implementation identifiers"):
-  adaptive -- EVSI ranking + cost-aware stopping (the full GraphWalkerSQL).
-  voi      -- EVSI ranking, stopping disabled (budget / exhaustion only).
-  eig      -- entropy-reduction ranking, no cost stop.
-  random   -- uniform selection with a fixed seed, no cost stop.
-  no-probe -- no active acquisition at all.
-
-All policies share the budget cap (4 active attempts) and candidate exhaustion;
-failed/timed-out probes still consume an attempt.
-"""
-from __future__ import annotations
-
+"""Global EVSI/EIG ranking with attempt costs and optional implication skips."""
 import random
-from dataclasses import dataclass, field
-
-from . import belief as B
-from . import config
+from dataclasses import dataclass, field, asdict
+from . import belief as B, config
 from .probe_executor import run_probe
-from .types import Decision, Probe, ProbeOutcome
+from .probes import compile_probe
 
 
 @dataclass
 class ExploreTrace:
-    """Auditable record of the Explore loop for one question."""
     policy: str
-    steps: list[dict] = field(default_factory=list)
+    steps: list = field(default_factory=list)
     attempts: int = 0
     stop_reason: str = ""
-    # Final per-decision posterior MAP + belief, consumed by Commit.
-    posteriors: dict[str, dict[str, float]] = field(default_factory=dict)
-    map_recommendations: dict[str, str] = field(default_factory=dict)
+    posteriors: dict = field(default_factory=dict)
+    map_recommendations: dict = field(default_factory=dict)
+    skips: list = field(default_factory=list)
 
 
-def _score(policy: str, belief: dict[str, float], probe: Probe) -> float:
-    if policy == "eig":
-        return B.eig(belief, probe)
-    return B.evsi(belief, probe)   # adaptive / voi / random all rank by EVSI value when needed
-
-
-def explore(
-    sqlite_path: str,
-    decisions: list[Decision],
-    policy: str = "adaptive",
-    budget: int = config.ACTIVE_PROBE_BUDGET,
-    lam: float = config.LAMBDA_COST,
-    cost: float = config.PROBE_COST,
-    seed: int = config.DEFAULT_SEED,
-    probe_runner=run_probe,
-) -> ExploreTrace:
-    """Run the Explore loop and return beliefs + an auditable trace.
-
-    ``probe_runner`` is injectable so the loop can be unit-tested with a
-    deterministic stub instead of a live SQLite probe.
-    """
-    policy = policy.lower()
-    trace = ExploreTrace(policy=policy)
-
-    # Initialize each decision's belief from its normalized priors.
-    beliefs: dict[str, dict[str, float]] = {
-        d.id: B.normalize_prior(d) for d in decisions
-    }
-    # Remaining probe pool: (decision_id, probe).
-    pool: list[tuple[str, Probe]] = [
-        (d.id, p) for d in decisions for p in d.probes
-    ]
-
+def explore(sqlite_path, decisions, policy="adaptive", budget=config.ACTIVE_PROBE_BUDGET,
+            lam=config.LAMBDA_COST, cost=config.PROBE_COST, seed=42, probe_runner=run_probe,
+            implication_filter=False, resource_budget=None):
+    if policy not in {"adaptive", "voi", "eig", "random", "no-probe"}:
+        raise ValueError("Unknown probe policy")
+    trace = ExploreTrace(policy)
+    beliefs = {d.id: B.normalize_prior(d) for d in decisions}
+    pool, seen = [], set()
+    for d in decisions:
+        for p in d.probes:
+            sql, params = compile_probe(p)
+            fact = (sql, params)
+            if fact in seen:
+                trace.skips.append({"probe_id": p.id, "reason": "duplicate_fact"})
+                continue
+            seen.add(fact)
+            pool.append((d.id, p))
+    pool.sort(key=lambda x: x[1].id)
     if policy == "no-probe":
         trace.stop_reason = "no_probe_policy"
-        _finalize(trace, decisions, beliefs)
-        return trace
-
-    rng = random.Random(seed)
-
-    while pool and trace.attempts < budget:
-        # --- selection (Eq. select) -------------------------------------- #
-        if policy == "random":
-            idx = rng.randrange(len(pool))
-            best_did, best_probe = pool[idx]
-            best_score = _score("evsi", beliefs[best_did], best_probe)
-        else:
-            scored = [
-                (_score(policy, beliefs[did], pr), did, pr)
-                for did, pr in pool
-            ]
-            # Ties broken deterministically by probe id (Appendix).
-            best_score, best_did, best_probe = max(
-                scored, key=lambda s: (s[0], _neg_id(s[2].id))
-            )
-            idx = next(i for i, (did, pr) in enumerate(pool)
-                       if did == best_did and pr.id == best_probe.id)
-
-        # --- cost-aware stopping (Eq. stop), adaptive only ---------------- #
-        if policy == "adaptive" and best_score <= lam * cost:
-            trace.stop_reason = "cost_threshold"
-            break
-
-        # --- execute probe, update only its decision's belief ------------- #
-        belief_before = dict(beliefs[best_did])
-        outcome: ProbeOutcome = probe_runner(sqlite_path, best_probe)
-        trace.attempts += 1
-        pool.pop(idx)
-
-        if outcome.available:
-            beliefs[best_did] = B.update_belief(
-                beliefs[best_did], best_probe, outcome.is_hit
-            )
-        trace.steps.append({
-            "attempt": trace.attempts,
-            "decision_id": best_did,
-            "probe_id": best_probe.id,
-            "kind": best_probe.kind,
-            "score": round(best_score, 6),
-            "score_type": "eig" if policy == "eig" else "evsi",
-            "status": outcome.status,
-            "available": outcome.available,
-            "belief_before": {k: round(v, 4) for k, v in belief_before.items()},
-            "belief_after": {k: round(v, 4) for k, v in beliefs[best_did].items()},
-        })
-
+    else:
+        rng, nonnull = random.Random(seed), set()
+        while pool and trace.attempts < budget:
+            scores = sorted([{"probe_id": p.id, "decision_id": did,
+                              "evsi": B.evsi(beliefs[did], p), "eig": B.eig(beliefs[did], p)}
+                             for did, p in pool],
+                            key=lambda x: (-x["eig" if policy == "eig" else "evsi"], x["probe_id"]))
+            aid = rng.choice(pool)[1].id if policy == "random" else scores[0]["probe_id"]
+            idx = next(i for i, (_, p) in enumerate(pool) if p.id == aid)
+            did, probe = pool[idx]
+            if implication_filter and probe.kind == "nonnull" and (probe.table, probe.column) in nonnull:
+                trace.skips.append({"probe_id": probe.id, "action": asdict(probe),
+                                    "reason": "implied_nonnull_hit", "free": True})
+                pool.pop(idx)
+                continue
+            score = next(s for s in scores if s["probe_id"] == aid)["eig" if policy == "eig" else "evsi"]
+            if policy == "adaptive" and score <= lam * cost:
+                trace.stop_reason = "cost_threshold"
+                break
+            before = dict(beliefs[did])
+            if resource_budget is None:
+                outcome = probe_runner(sqlite_path, probe)
+            else:
+                outcome = probe_runner(sqlite_path, probe, budget=resource_budget)
+            trace.attempts += 1
+            pool.pop(idx)
+            surprise = False
+            if outcome.available:
+                surprise = B.predicted_obs_prob(before, probe, outcome.is_hit) <= config.MIN_OBS_PROB
+                beliefs[did] = B.update_belief(before, probe, outcome.is_hit)
+            if outcome.is_hit:
+                if probe.kind in {"duplicate", "nonnull"} or probe.kind == "equals" and probe.literal is not None:
+                    nonnull.add((probe.table, probe.column))
+                if probe.kind == "overlap":
+                    nonnull.update({(probe.table, probe.column), (probe.table2, probe.column2)})
+            trace.steps.append({"attempt": trace.attempts, "decision_id": did,
+                "probe_id": probe.id, "kind": probe.kind, "action": asdict(probe),
+                "sql": outcome.sql, "parameters": list(outcome.parameters),
+                "score": score, "ranked_scores": scores,
+                "score_type": "eig" if policy == "eig" else "evsi",
+                "status": outcome.status, "available": outcome.available,
+                "error": outcome.error, "surprise": surprise,
+                "belief_before": before, "belief_after": dict(beliefs[did]),
+                "cost": cost, "budget_remaining": budget - trace.attempts})
     if not trace.stop_reason:
         trace.stop_reason = "budget" if trace.attempts >= budget else "exhausted"
-
-    _finalize(trace, decisions, beliefs)
+    trace.posteriors = beliefs
+    trace.map_recommendations = {d.id: B.map_commitment(beliefs[d.id]) for d in decisions}
     return trace
-
-
-def _finalize(trace: ExploreTrace, decisions: list[Decision],
-              beliefs: dict[str, dict[str, float]]) -> None:
-    for d in decisions:
-        b = beliefs.get(d.id, {})
-        trace.posteriors[d.id] = {k: round(v, 6) for k, v in b.items()}
-        trace.map_recommendations[d.id] = B.map_commitment(b)
-
-
-def _neg_id(probe_id: str) -> tuple:
-    """Deterministic tiebreak key: smaller probe id wins (lexicographic)."""
-    return tuple(-ord(c) for c in probe_id)

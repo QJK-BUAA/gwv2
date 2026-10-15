@@ -77,9 +77,10 @@ def extract_json(text: str, required_keys: tuple[str, ...]) -> dict[str, Any] | 
             return obj
     # whole-response repair
     try:
-        obj = json.loads(text.strip())
+        from json_repair import loads
+        obj = loads(text.strip())
         if isinstance(obj, dict) and all(k in obj for k in required_keys):
             return obj
-    except json.JSONDecodeError:
+    except (ValueError, TypeError):
         pass
     return None

@@ -104,14 +104,14 @@ def normalize_prior(decision: Decision) -> dict[str, float]:
     back to a uniform distribution so the decision stays well-formed.
     """
     keys = [itp.key for itp in decision.interpretations]
-    raw = []
-    for itp in decision.interpretations:
-        v = itp.prior
-        if not math.isfinite(v) or v < 0.0:
-            v = 0.0
-        raw.append(v)
-    total = sum(raw)
-    if total <= 0.0:
-        n = len(keys)
-        return {k: 1.0 / n for k in keys} if n else {}
-    return {k: v / total for k, v in zip(keys, raw)}
+    if len(set(keys)) != len(keys):
+        raise ValueError("Duplicate interpretation ids")
+    return dict(zip(keys, normalize([itp.prior for itp in decision.interpretations])))
+
+
+def normalize(values):
+    values = [float(v) for v in values]
+    if not values or any(not math.isfinite(v) or v < 0 for v in values) or sum(values) <= 0:
+        raise ValueError("Invalid probability vector")
+    total = sum(values)
+    return [v / total for v in values]

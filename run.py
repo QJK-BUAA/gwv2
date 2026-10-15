@@ -26,6 +26,7 @@ import json
 import os
 import sys
 import threading
+from dataclasses import asdict
 from concurrent.futures import ThreadPoolExecutor
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -43,7 +44,7 @@ def build_ablation(args) -> AblationConfig:
         probe_policy=args.policy,
         budget=args.budget,
         lam=args.lam,
-        seed=args.seed,
+        seed=args.probe_seed,
         include_draft=not args.no_draft,
         include_structural=not args.no_structural,
         include_model=not args.no_model,
@@ -51,6 +52,8 @@ def build_ablation(args) -> AblationConfig:
         include_beliefs=not args.no_beliefs,
         coverage_contract=not args.ordinary_commit,
         collect_stats=args.collect_stats,
+        implication_filter=args.implication_filter,
+        catalog_mode=args.catalog,
     )
 
 
@@ -65,6 +68,7 @@ def main() -> None:
     ap.add_argument("--budget", type=int, default=config.ACTIVE_PROBE_BUDGET)
     ap.add_argument("--lam", type=float, default=config.LAMBDA_COST)
     ap.add_argument("--seed", type=int, default=config.DEFAULT_SEED)
+    ap.add_argument("--probe-seed", type=int, default=42)
     ap.add_argument("--model", default=config.DEFAULT_MODEL)
     ap.add_argument("--workers", type=int, default=4)
     ap.add_argument("--tag", default="run")
@@ -78,6 +82,8 @@ def main() -> None:
     ap.add_argument("--no-beliefs", action="store_true")
     ap.add_argument("--ordinary-commit", action="store_true")
     ap.add_argument("--collect-stats", action="store_true")
+    ap.add_argument("--implication-filter", action="store_true")
+    ap.add_argument("--catalog", choices=["full", "trimmed"], default="full")
     ap.add_argument("--no-eval", action="store_true",
                     help="skip official EX scoring (predictions only)")
     args = ap.parse_args()
@@ -98,19 +104,10 @@ def main() -> None:
     def work(ex):
         # One LLM client per question so num_calls reflects the 6-call budget;
         # the shared cache keeps outputs identical across threads/re-runs.
-        llm = LLM(model=args.model, seed=args.seed, response_cache=cache)
+        llm = LLM(model=args.model, seed=42, response_cache=cache)
         res = run_pipeline(llm, ex.instance_id, ex.db_id, ex.question,
                            ex.evidence, ex.sqlite_path, ablation)
-        rec = {
-            "instance_id": res.instance_id, "db_id": res.db_id,
-            "question": res.question, "pred_sql": res.pred_sql,
-            "draft_sql": res.draft_sql, "selected_columns": res.selected_columns,
-            "n_candidates": res.n_candidates, "n_paths": res.n_paths,
-            "n_decisions": res.n_decisions, "probe_attempts": res.probe_attempts,
-            "stop_reason": res.stop_reason, "observations": res.observations,
-            "model_calls": res.model_calls, "error": res.error,
-            "tokens": llm.stats(),
-        }
+        rec = asdict(res)
         with lock:
             results[ex.instance_id] = rec
             done = len(results)
@@ -138,7 +135,8 @@ def main() -> None:
 
     if not args.no_eval:
         score = evaluate(args.dataset, examples, pred_sql,
-                         os.path.join(args.outdir, f"{stem}.eval"))
+                         os.path.join(args.outdir, f"{stem}.eval"),
+                         statuses={i: r["status"] for i, r in results.items()})
         summary = {"ex": score.get("ex"), "correct": score.get("correct"),
                    "n": score.get("n"), "mean_probes": round(mean_probes, 2)}
         out_summary = os.path.join(args.outdir, f"{stem}.summary.json")

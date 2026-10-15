@@ -2,11 +2,10 @@
 
 Two benchmarks reported in the paper, reduced to a common ``Example``:
   * BIRD-Dev      -- declared FKs; 1,534 questions / 11 databases; difficulty labels.
-  * Spider 1.0-Dev -- declared FKs; 1,034 questions / 166 databases.
-  * Spider-200    -- the paper's *fixed hash-selected* 200-question Spider-Dev
-                     subset. Selection is a deterministic content hash (stable
-                     across machines and runs), not a random draw, matching the
-                     "fixed hash-selected" description in the paper's Setup.
+  * Spider 1.0-Dev -- declared FKs; 1,034 questions / 20 dev databases.
+  * Spider-200    -- a committed, content-hash-selected reproduction cohort.
+                     The original paper's 200 source indices are unavailable.
+                     Its exact provenance is recorded in manifests/spider200.json.
 
 ``evidence`` carries BIRD's external knowledge (``e`` in the paper); Spider has
 none. ``idx`` is the original source-file index, kept for gold alignment in the
@@ -18,6 +17,7 @@ import hashlib
 import json
 import os
 from dataclasses import dataclass
+from pathlib import Path
 
 from . import config
 
@@ -45,7 +45,7 @@ def load_bird() -> list[Example]:
         db = ex["db_id"]
         sp = os.path.join(config.BIRD_DB_DIR, db, f"{db}.sqlite")
         if not os.path.exists(sp):
-            continue
+            raise FileNotFoundError(f"Missing BIRD database {db}; run reproduce.py --prepare-only")
         out.append(Example(
             idx=i, instance_id=f"bird_{ex['question_id']}", db_id=db,
             question=ex["question"], evidence=ex.get("evidence", ""),
@@ -63,7 +63,7 @@ def load_spider1() -> list[Example]:
         db = ex["db_id"]
         sp = os.path.join(config.SPIDER1_DB_DIR, db, f"{db}.sqlite")
         if not os.path.exists(sp):
-            continue
+            raise FileNotFoundError(f"Missing Spider database {db}; run reproduce.py --prepare-only")
         gold = ex.get("query", "")
         # dev_gold.sql lines are "SQL\tdb_id"; keep them index-aligned for eval.
         if i < len(gold_lines) and "\t" in gold_lines[i]:
@@ -77,23 +77,21 @@ def load_spider1() -> list[Example]:
 
 def load_spider200(
     size: int = config.SPIDER200_SIZE,
-    salt: str = config.SPIDER200_SALT,
 ) -> list[Example]:
-    """The paper's fixed, hash-selected 200-question Spider-Dev subset.
-
-    Each example is scored by a SHA-256 hash of ``salt + db_id + question``. The
-    lowest ``size`` hashes are kept, then re-sorted by original index for stable
-    evaluator alignment. This is reproducible on any machine and never touches a
-    PRNG, so the subset is literally "fixed" rather than seed-dependent.
-    """
+    """Load explicit frozen IDs, checking source bytes and source-index alignment."""
+    manifest = json.loads(Path(config.SPIDER200_MANIFEST).read_text())
+    dev_hash = hashlib.sha256(Path(config.SPIDER1_DEV_JSON).read_bytes()).hexdigest()
+    if manifest["dev_sha256"] != dev_hash:
+        raise ValueError("Spider-200 manifest does not match this development split")
     examples = load_spider1()
-
-    def _key(e: Example) -> str:
-        payload = f"{salt}|{e.db_id}|{e.question.strip()}"
-        return hashlib.sha256(payload.encode("utf-8")).hexdigest()
-
-    chosen = sorted(examples, key=_key)[: min(size, len(examples))]
-    return sorted(chosen, key=lambda e: e.idx)
+    indices = manifest["source_indices"]
+    if len(indices) != 200 or len(set(indices)) != 200:
+        raise ValueError("Invalid Spider-200 source indices")
+    by_index = {e.idx: e for e in examples}
+    chosen = [by_index[i] for i in indices]
+    if [e.instance_id for e in chosen] != manifest["instance_ids"]:
+        raise ValueError("Spider-200 ID alignment mismatch")
+    return sorted(chosen, key=lambda e: e.idx)[:size]
 
 
 LOADERS = {

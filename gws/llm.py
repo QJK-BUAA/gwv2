@@ -1,16 +1,16 @@
 """Thin OpenAI-compatible LLM wrapper with call/token accounting.
 
-GraphWalker-SQL 2.0 is training-free: the LLM is used only for lightweight,
-white-box decisions (joinability discovery, source/destination anchoring, path
-selection, SQL generation). Any OpenAI-compatible endpoint works; this project
-defaults to DeepSeek ``deepseek-chat`` at temperature 0 for determinism.
+GraphWalkerSQL uses a shared OpenAI-compatible backend for Ground, the local
+decision model, Commit, and final SQL generation. Defaults follow the paper.
 """
 from __future__ import annotations
 
 import os
+import hashlib
 import threading
 import time
 from dataclasses import dataclass
+from contextlib import contextmanager
 from typing import Any
 
 from openai import OpenAI
@@ -26,6 +26,8 @@ class CompletionResult:
     response_id: str
     usage: dict[str, Any]
     cached: bool
+    model: str = ""
+    finish_reason: str = ""
 
 
 class LLM:
@@ -50,7 +52,8 @@ class LLM:
                 "No API key found. Set $DS_API_KEY / $DEEPSEEK_API_KEY "
                 "(or $OPENAI_API_KEY for an OpenAI endpoint)."
             )
-        self.client = OpenAI(base_url=base_url, api_key=api_key, timeout=timeout)
+        self.client = OpenAI(base_url=base_url, api_key=api_key, timeout=timeout, max_retries=0)
+        self.backend_hash = hashlib.sha256(base_url.rstrip("/").encode()).hexdigest()
         self.model = model
         self.temperature = temperature
         self.max_retries = int(os.environ.get("GWS2_LLM_MAX_RETRIES",
@@ -77,17 +80,31 @@ class LLM:
         self.num_calls = 0
         self.in_tokens = 0
         self.out_tokens = 0
+        self.paid_calls = 0
+        self.paid_in_tokens = 0
+        self.paid_out_tokens = 0
+        self.calls = []
+        self.budget = None
+        self.stage = "model"
         self._lock = threading.Lock()
 
-    def complete(self, system: str, user: str, temperature: float | None = None) -> str:
+    @contextmanager
+    def phase(self, name):
+        old, self.stage = self.stage, name
+        try:
+            yield
+        finally:
+            self.stage = old
+
+    def complete(self, system: str, user: str, temperature: float | None = None, **kwargs) -> str:
         messages = [
             {"role": "system", "content": system},
             {"role": "user", "content": user},
         ]
-        return self.complete_messages(messages, temperature=temperature)
+        return self.complete_messages(messages, temperature=temperature, **kwargs)
 
     def complete_messages(self, messages: list[dict],
-                          temperature: float | None = None) -> str:
+                          temperature: float | None = None, **kwargs) -> str:
         """Complete an explicit multi-turn conversation.
 
         AutoLink-style iterative SQL revision needs to preserve prior assistant
@@ -97,6 +114,7 @@ class LLM:
         return self.complete_messages_with_metadata(
             messages,
             temperature=temperature,
+            **kwargs,
         ).text
 
     def complete_messages_with_metadata(
@@ -104,7 +122,14 @@ class LLM:
         messages: list[dict],
         temperature: float | None = None,
         seed: int | None = None,
+        max_tokens: int = config.MAX_OUTPUT_TOKENS,
+        stage: str | None = None,
     ) -> CompletionResult:
+        stage = stage or self.stage
+        if self.budget is not None:
+            self.budget.charge_call(stage, final=stage.startswith("generation"))
+        with self._lock:
+            self.num_calls += 1
         request = RequestEnvelope(
             model=self.model,
             messages=messages,
@@ -115,6 +140,8 @@ class LLM:
             ),
             seed=self.seed if seed is None else seed,
             extra_body=self.extra_body,
+            max_tokens=max_tokens,
+            backend_hash=self.backend_hash,
         )
         cached = (
             self.response_cache.get(request)
@@ -122,21 +149,37 @@ class LLM:
             else None
         )
         if cached is not None:
-            return CompletionResult(
+            result = CompletionResult(
                 text=cached.text,
                 request_hash=cached.request_hash,
                 response_id=cached.response_id,
                 usage=dict(cached.usage),
                 cached=True,
+                model=cached.model,
+                finish_reason=cached.finish_reason,
             )
-
-        result = self._call_provider(request)
-        if self.response_cache is not None:
+        else:
+            try:
+                result = self._call_provider(request)
+            except Exception:
+                self.calls.append({"stage": stage, "request_hash": request.request_hash,
+                                   "status": "error", "usage": {}, "cached": False})
+                raise
+        with self._lock:
+            self.in_tokens += int(result.usage.get("prompt_tokens") or 0)
+            self.out_tokens += int(result.usage.get("completion_tokens") or 0)
+            self.calls.append({"stage": stage, "request_hash": result.request_hash,
+                               "response_id": result.response_id, "model": result.model,
+                               "finish_reason": result.finish_reason, "usage": result.usage,
+                               "cached": result.cached, "status": "ok"})
+        if not result.cached and self.response_cache is not None:
             self.response_cache.put(
                 request,
                 result.text,
                 result.response_id,
                 result.usage,
+                result.model,
+                result.finish_reason,
             )
         return result
 
@@ -151,6 +194,7 @@ class LLM:
                     model=request.model,
                     messages=request.messages,
                     temperature=request.temperature,
+                    max_tokens=request.max_tokens,
                 )
                 if request.seed is not None:
                     kwargs["seed"] = request.seed
@@ -159,11 +203,11 @@ class LLM:
                 resp = self.client.chat.completions.create(**kwargs)
                 usage = _usage_dict(resp.usage)
                 with self._lock:
-                    self.num_calls += 1
-                    self.in_tokens += int(
+                    self.paid_calls += 1
+                    self.paid_in_tokens += int(
                         usage.get("prompt_tokens") or 0
                     )
-                    self.out_tokens += int(
+                    self.paid_out_tokens += int(
                         usage.get("completion_tokens") or 0
                     )
                 return CompletionResult(
@@ -174,6 +218,8 @@ class LLM:
                     response_id=str(getattr(resp, "id", "") or ""),
                     usage=usage,
                     cached=False,
+                    model=str(getattr(resp, "model", "") or request.model),
+                    finish_reason=str(resp.choices[0].finish_reason or ""),
                 )
             except Exception as e:  # noqa: BLE001
                 last_err = e
@@ -187,13 +233,19 @@ class LLM:
                     delay = min(self.retry_cap,
                                 self.retry_base * (2 ** attempt))
                     time.sleep(delay)
-        raise RuntimeError(f"LLM call failed after {self.max_retries} retries: {last_err}")
+        # Provider exception bodies may contain credentials or request data.
+        raise RuntimeError(f"Provider request failed ({type(last_err).__name__}, "
+                           f"HTTP {getattr(last_err, 'status_code', None)})") from None
 
     def stats(self) -> dict:
         return {
             "num_calls": self.num_calls,
             "input_tokens": self.in_tokens,
             "output_tokens": self.out_tokens,
+            "paid_calls": self.paid_calls,
+            "paid_input_tokens": self.paid_in_tokens,
+            "paid_output_tokens": self.paid_out_tokens,
+            "cached_calls": sum(c["cached"] for c in self.calls),
         }
 
 

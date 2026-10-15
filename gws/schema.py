@@ -9,7 +9,9 @@ from __future__ import annotations
 
 import re
 import sqlite3
+import json
 from dataclasses import dataclass, field
+from .sqlite_access import read_only_uri
 
 
 @dataclass
@@ -63,7 +65,10 @@ class Schema:
         return list(self.tables.keys())
 
     def column(self, table: str, column: str) -> Column | None:
-        for c in self.tables.get(table, []):
+        if not isinstance(table, str) or not isinstance(column, str):
+            return None
+        actual = next((t for t in self.tables if t.lower() == table.lower()), table)
+        for c in self.tables.get(actual, []):
             if c.name.lower() == column.lower():
                 return c
         return None
@@ -158,8 +163,29 @@ class Schema:
         return "\n".join(lines)
 
 
+def load_foreign_key_registry(schema, path):
+    """Benchmark-provided visible FK catalog, independent of query gold SQL."""
+    records = json.loads(open(path).read())
+    record = next((r for r in records if r.get("db_id") == schema.name), None)
+    if record is None:
+        raise ValueError("Database absent from benchmark catalog")
+    tables = record.get("table_names_original", record.get("table_names"))
+    columns = record.get("column_names_original", record.get("column_names"))
+    actual_tables = {t.lower(): t for t in schema.tables}
+    fks = []
+    for i, j in record.get("foreign_keys", []):
+        ti, ci = columns[i]
+        tj, cj = columns[j]
+        a, b = actual_tables.get(tables[ti].lower()), actual_tables.get(tables[tj].lower())
+        if a is None or b is None or schema.column(a, ci) is None or schema.column(b, cj) is None:
+            raise ValueError("Invalid benchmark FK endpoints")
+        fks.append(ForeignKey(a, schema.column(a, ci).name, b, schema.column(b, cj).name))
+    schema.declared_fks = fks
+    schema.raw_ddl = {t: schema._trusted_table_ddl(t, schema.table_names()) for t in schema.tables}
+
+
 def extract_schema(sqlite_path: str, name: str | None = None) -> Schema:
-    con = sqlite3.connect(f"file:{sqlite_path}?mode=ro", uri=True)
+    con = sqlite3.connect(read_only_uri(sqlite_path), uri=True)
     cur = con.cursor()
     schema = Schema(name=name or sqlite_path.split("/")[-1].replace(".sqlite", ""))
 
@@ -170,13 +196,14 @@ def extract_schema(sqlite_path: str, name: str | None = None) -> Schema:
     for tname, tsql in rows:
         schema.raw_ddl[tname] = tsql or ""
         cols: list[Column] = []
+        quoted = tname.replace('"', '""')
         for _cid, cname, ctype, _nn, _dflt, pk in cur.execute(
-            f'PRAGMA table_info("{tname}")'
+            f'PRAGMA table_info("{quoted}")'
         ):
             cols.append(Column(name=cname, type=(ctype or "TEXT").upper(), pk=bool(pk)))
         schema.tables[tname] = cols
 
-        for fk in cur.execute(f'PRAGMA foreign_key_list("{tname}")'):
+        for fk in cur.execute(f'PRAGMA foreign_key_list("{quoted}")'):
             ref_table, from_col, to_col = fk[2], fk[3], fk[4]
             if to_col is None:
                 pkcols = [c.name for c in schema.tables.get(ref_table, []) if c.pk]
@@ -186,6 +213,12 @@ def extract_schema(sqlite_path: str, name: str | None = None) -> Schema:
                            ref_table=ref_table, ref_column=to_col)
             )
     con.close()
+    # Implicit referenced PKs can point to a table loaded later.
+    for fk in schema.declared_fks:
+        if schema.column(fk.ref_table, fk.ref_column) is None:
+            keys = [c.name for c in schema.tables.get(fk.ref_table, []) if c.pk]
+            if len(keys) == 1:
+                fk.ref_column = keys[0]
     return schema
 
 
@@ -197,7 +230,7 @@ def collect_column_stats(sqlite_path: str, schema: Schema,
     in which case belief scoring falls back to name-only signals.
     """
     import threading
-    con = sqlite3.connect(f"file:{sqlite_path}?mode=ro", uri=True)
+    con = sqlite3.connect(read_only_uri(sqlite_path), uri=True)
     timer = threading.Timer(timeout, con.interrupt)
     timer.start()
     try:

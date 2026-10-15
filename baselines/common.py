@@ -1,83 +1,129 @@
-"""Shared helpers for the locally adapted baselines.
-
-Every baseline runs on the SAME backend as GraphWalkerSQL (shared ``gws.llm.LLM``,
-datasets, SQLite execution, and official evaluators), matching the paper's
-"locally adapted baselines on the same backend" protocol (Appendix "Resource-
-Aligned Protocol"). Each baseline implements its own distinguishing mechanism
-and emits exactly one final SQL, scored by the official evaluator.
-"""
-from __future__ import annotations
-
-import re
-from collections import Counter
-
-from gws.execute import result_signature, run_query
+"""Shared, metadata-isolated runtime for the paper's baseline adaptations."""
+from dataclasses import asdict
+import copy
+import threading
+from gws.execute import run_query
+from gws.commit import clean_final_sql
 from gws.schema import Schema
 
-_FENCE = re.compile(r"```(?:sql)?\s*(.*?)```", re.DOTALL | re.IGNORECASE)
+
+def schema_columns(schema, tables=None):
+    return {f"{t}.{c.name}" for t in schema.table_names() if tables is None or t in tables
+            for c in schema.tables[t]}
 
 
-def full_ddl(schema: Schema, tables: list[str] | None = None) -> str:
-    """Annotated full DDL (with BIRD column meanings when available)."""
-    return schema.to_ddl_text(tables=tables, annotate=True)
-
-
-def compact_schema(schema: Schema, tables: list[str] | None = None) -> str:
-    return schema.compact_text(tables=tables)
-
-
-def extract_sql(text: str) -> str:
-    if not text:
-        return ""
-    m = _FENCE.search(text)
-    sql = (m.group(1) if m else text).strip()
-    return sql.rstrip(";").strip()
-
-
-def clean_sql(sql: str) -> str:
-    """Keep a single SELECT/CTE; drop metadata references the runner forbids."""
-    sql = extract_sql(sql)
-    low = sql.lower().lstrip()
-    if not (low.startswith("select") or low.startswith("with")):
-        return ""
-    if any(tok in low for tok in ("pragma", "sqlite_master", "sqlite_schema")):
-        return ""
-    return sql
-
-
-def common_context(schema: Schema, question: str, evidence: str,
-                   tables: list[str] | None = None) -> str:
-    parts = [full_ddl(schema, tables), "", f"Question: {question}"]
-    if evidence:
-        parts.append(f"External evidence: {evidence}")
-    return "\n".join(parts)
-
-
-def self_consistency(sqlite_path: str, candidates: list[str]) -> str:
-    """Pick the SQL whose execution result is most common (C3-style voting).
-
-    Candidates that fail to execute are ignored for voting; if none execute, the
-    first non-empty candidate is returned verbatim.
-    """
-    cands = [c for c in candidates if c]
-    if not cands:
-        return "SELECT 1"
-    sig_to_sql: dict[str, str] = {}
-    votes: Counter = Counter()
-    for sql in cands:
-        sig = result_signature(sqlite_path, sql)
-        if sig is None:
+def normalize_selection(schema, raw):
+    valid = {x.lower(): x for x in schema_columns(schema)}
+    tables = {t.lower(): t for t in schema.table_names()}
+    output = set()
+    for table, columns in raw.items():
+        table = str(table).removeprefix(schema.name + ".").strip('`"')
+        actual = tables.get(table.lower())
+        if actual is None or not isinstance(columns, list):
             continue
-        votes[sig] += 1
-        sig_to_sql.setdefault(sig, sql)
-    if not votes:
-        return cands[0]
-    best_sig, _ = votes.most_common(1)[0]
-    return sig_to_sql[best_sig]
+        for col in columns:
+            if isinstance(col, dict):
+                col = col.get("column_name", "")
+            if isinstance(col, str):
+                key = f"{actual}.{col.strip(chr(96) + chr(34))}".lower()
+                if key in valid:
+                    output.add(valid[key])
+    return output
 
 
-def runs_ok(sqlite_path: str, sql: str) -> tuple[bool, str]:
-    res = run_query(sqlite_path, sql, max_rows=5)
-    if res.get("ok"):
-        return True, ""
-    return False, str(res.get("error", ""))[:200]
+def selection(schema, columns, **extra):
+    valid = schema_columns(schema)
+    columns = sorted(set(columns) & valid)
+    return {"columns": columns,
+            "tables": [t for t in schema.table_names()
+                       if any(c.startswith(t + ".") for c in columns)], **extra}
+
+
+def selected_schema(schema, columns):
+    chosen = copy.deepcopy(schema)
+    keep = set(columns)
+    chosen.tables = {t: [c for c in cs if f"{t}.{c.name}" in keep]
+                     for t, cs in chosen.tables.items()}
+    chosen.tables = {t: cs for t, cs in chosen.tables.items() if cs}
+    chosen.declared_fks = [f for f in chosen.declared_fks
+                          if f"{f.src_table}.{f.src_column}" in keep
+                          and f"{f.ref_table}.{f.ref_column}" in keep]
+    chosen.raw_ddl = {}
+    # A subset of a composite key is not itself a primary key.
+    for table, cs in chosen.tables.items():
+        original_keys = {c.name for c in schema.tables[table] if c.pk}
+        if not original_keys <= {c.name for c in cs}:
+            for c in cs:
+                c.pk = False
+    return chosen
+
+
+def selected_ddl(schema, columns):
+    return selected_schema(schema, columns).to_ddl_text(trusted_er=True, annotate=False)
+
+
+class SafeDB:
+    def __init__(self, path, schema, budget=None):
+        self.path, self.schema, self.budget = path, schema, budget
+        self.queries = []
+        self.lock = threading.Lock()
+
+    def execute(self, sql, timeout=5., cap=20, params=None):
+        result = run_query(self.path, sql, timeout=min(timeout, 5.), max_rows=min(cap, 2000),
+                           params=params, budget=self.budget, stage="baseline_read")
+        with self.lock:
+            self.queries.append({"sql": sql, "params": params, **result})
+        return result.get("columns", []), result.get("rows", []), result.get("error")
+
+    def schema_overview(self):
+        return self.schema.to_ddl_text(trusted_er=True, annotate=False)
+
+    def get_foreign_keys(self):
+        result = {}
+        for f in self.schema.declared_fks:
+            result.setdefault(f.src_table, []).append({
+                "from_table": f.src_table, "from_column": f.src_column,
+                "to_table": f.ref_table, "to_column": f.ref_column})
+        return result
+
+
+class FixedBackend:
+    """Inject shared request settings, overriding released sampling defaults."""
+    def __init__(self, llm, stage):
+        self.llm, self.stage = llm, stage
+        self.model = llm.model
+        self.temperature = 0
+
+    def complete(self, system, user, temperature=None, **kwargs):
+        return self.llm.complete(system, user, temperature=0, seed=42,
+                                 stage=kwargs.get("stage", self.stage))
+
+    def complete_messages(self, messages, temperature=None, **kwargs):
+        return self.complete_messages_with_metadata(messages).text
+
+    def complete_messages_with_metadata(self, messages, temperature=None, **kwargs):
+        return self.llm.complete_messages_with_metadata(
+            messages, temperature=0, seed=42, stage=self.stage)
+
+    def __call__(self, messages, temperature=0):
+        return self.complete_messages(messages)
+
+
+GEN_SYSTEM = """You are an expert SQLite text-to-SQL generator.
+Write exactly one SQL query answering the question using the supplied schema.
+Return only SQL. Return only the requested output columns.
+Use the provided evidence. Ensure floating-point arithmetic for ratios.
+Visible relationship metadata may be incomplete or noisy; use it as a candidate,
+not proof that a join is relevant to the question."""
+
+
+def generate(schema, linked, question, evidence, llm, stage="generation:baseline"):
+    prompt = (f"Schema:\n{selected_ddl(schema, linked['columns'])}\n\n"
+              f"Question: {question}\nEvidence: {evidence}\n\nSQL:")
+    return clean_final_sql(llm.complete(GEN_SYSTEM, prompt, temperature=0, seed=42, stage=stage))
+
+
+# Compatibility for external callers.
+clean_sql = clean_final_sql
+full_ddl = lambda schema, tables=None: schema.to_ddl_text(tables=tables, trusted_er=True)
+compact_schema = lambda schema, tables=None: schema.compact_text(tables=tables)
